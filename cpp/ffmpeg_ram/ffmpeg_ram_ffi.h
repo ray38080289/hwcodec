@@ -26,6 +26,7 @@ int ffmpeg_ram_decode(void *decoder, const uint8_t *data, int length,
                       const void *obj);
 void ffmpeg_ram_free_encoder(void *encoder);
 void ffmpeg_ram_free_decoder(void *decoder);
+int ffmpeg_ram_set_native_output(void *decoder, int on);
 int ffmpeg_ram_get_linesize_offset_length(int pix_fmt, int width, int height,
                                           int align, int *linesize, int *offset,
                                           int *length);

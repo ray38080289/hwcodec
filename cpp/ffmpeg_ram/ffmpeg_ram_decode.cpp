@@ -18,6 +18,19 @@ extern "C" {
 #ifdef _WIN32
 #include <libavutil/hwcontext_d3d11va.h>
 #endif
+#ifdef __APPLE__
+#include <CoreVideo/CoreVideo.h>
+#include <stdlib.h>
+#include <string.h>
+// Same value as HWCODEC_PIX_FMT_CVPIXELBUFFER in ffmpeg_ffi.h: the callback gets the VideoToolbox frame's
+// CVPixelBufferRef in data[3] instead of a download into system memory. The callee retains it before returning.
+#define HWCODEC_PIX_FMT_CVPIXELBUFFER 0x10000
+// On unless RUSTDESK_VT_NATIVE=0, and only after the caller opted in with ffmpeg_ram_set_native_output.
+static bool vt_native_env() {
+  const char *e = getenv("RUSTDESK_VT_NATIVE");
+  return !(e && !strcmp(e, "0"));
+}
+#endif
 
 #include "common.h"
 #include "system.h"
@@ -38,6 +51,7 @@ public:
   AVFrame *frame_ = NULL;
   AVPacket *pkt_ = NULL;
   bool hwaccel_ = true;
+  bool native_output_ = false;
 
   std::string name_;
   AVHWDeviceType device_type_ = AV_HWDEVICE_TYPE_NONE;
@@ -192,6 +206,26 @@ private:
         goto _exit;
       }
 
+#ifdef __APPLE__
+      // macOS: hand the decoded CVPixelBuffer (NV12, IOSurface-backed) straight to the caller, which displays it as a
+      // Flutter texture. Saves the download into system memory, the copy into Rust and the NV12 -> RGBA conversion.
+      if (hwaccel_ && native_output_ && frame_->format == AV_PIX_FMT_VIDEOTOOLBOX && frame_->data[3]) {
+        CVPixelBufferRef pb = (CVPixelBufferRef)frame_->data[3];
+        const OSType f = CVPixelBufferGetPixelFormatType(pb);
+        if (f == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+            f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
+          decoded = true;
+#if FF_API_FRAME_KEY
+          int key_native = frame_->flags & AV_FRAME_FLAG_KEY;
+#else
+          int key_native = frame_->key_frame;
+#endif
+          callback_(obj, (int)CVPixelBufferGetWidth(pb), (int)CVPixelBufferGetHeight(pb),
+                    (AVPixelFormat)HWCODEC_PIX_FMT_CVPIXELBUFFER, frame_->linesize, frame_->data, key_native);
+          continue;
+        }
+      }
+#endif
       if (hwaccel_) {
         if (!frame_->hw_frames_ctx) {
           LOG_ERROR(std::string("hw_frames_ctx is NULL"));
@@ -323,4 +357,17 @@ extern "C" int ffmpeg_ram_decode(FFmpegRamDecoder *decoder, const uint8_t *data,
     LOG_ERROR(std::string("ffmpeg_ram_decode exception:") + e.what());
   }
   return HWCODEC_ERR_COMMON;
+}
+
+// macOS: let decoded VideoToolbox frames go out as CVPixelBufferRefs (HWCODEC_PIX_FMT_CVPIXELBUFFER) instead of being
+// downloaded. Returns 1 when that output is in effect, 0 otherwise (other platforms, RUSTDESK_VT_NATIVE=0).
+extern "C" int ffmpeg_ram_set_native_output(FFmpegRamDecoder *decoder, int on) {
+#ifdef __APPLE__
+  if (!decoder) return 0;
+  decoder->native_output_ = on && vt_native_env() && decoder->device_type_ == AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+  return decoder->native_output_ ? 1 : 0;
+#else
+  (void)decoder; (void)on;
+  return 0;
+#endif
 }

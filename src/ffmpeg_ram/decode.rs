@@ -7,8 +7,8 @@ use crate::{
     common::DataFormat::*,
     ffmpeg::{AVHWDeviceType, AVPixelFormat},
     ffmpeg_ram::{
-        ffmpeg_ram_decode, ffmpeg_ram_free_decoder, ffmpeg_ram_new_decoder, CodecInfo,
-        AV_NUM_DATA_POINTERS,
+        ffmpeg_ram_decode, ffmpeg_ram_free_decoder, ffmpeg_ram_new_decoder,
+        ffmpeg_ram_set_native_output, CodecInfo, AV_NUM_DATA_POINTERS,
     },
 };
 use log::error;
@@ -34,6 +34,25 @@ pub struct DecodeFrame {
     pub data: Vec<Vec<u8>>,
     pub linesize: Vec<i32>,
     pub key: bool,
+    /// macOS: a retained CVPixelBufferRef (NV12) when pixfmt is HWCODEC_PIX_FMT_CVPIXELBUFFER, else 0.
+    /// Released when the frame is dropped; a consumer that keeps it must retain it itself.
+    pub native: usize,
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn CFRetain(cf: *const c_void) -> *const c_void;
+    fn CFRelease(cf: *const c_void);
+}
+
+impl Drop for DecodeFrame {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        if self.native != 0 {
+            unsafe { CFRelease(self.native as *const c_void) };
+            self.native = 0;
+        }
+    }
 }
 
 impl std::fmt::Display for DecodeFrame {
@@ -87,6 +106,12 @@ impl Decoder {
         }
     }
 
+    /// macOS (VideoToolbox decoders): deliver frames as CVPixelBuffers (DecodeFrame::native) instead of
+    /// downloading them. Returns whether that output is now in effect.
+    pub fn set_native_output(&mut self, on: bool) -> bool {
+        unsafe { ffmpeg_ram_set_native_output(self.codec, on as c_int) != 0 }
+    }
+
     pub fn decode(&mut self, packet: &[u8]) -> Result<&mut Vec<DecodeFrame>, i32> {
         unsafe {
             (&mut *self.frames).clear();
@@ -125,7 +150,19 @@ impl Decoder {
             data: vec![],
             linesize: vec![],
             key: key != 0,
+            native: 0,
         };
+
+        #[cfg(target_os = "macos")]
+        if pixfmt == AVPixelFormat::HWCODEC_PIX_FMT_CVPIXELBUFFER as c_int {
+            let pb = datas[3] as *const c_void;
+            if !pb.is_null() {
+                CFRetain(pb);
+                frame.native = pb as usize;
+                frames.push(frame);
+            }
+            return;
+        }
 
         if pixfmt == AVPixelFormat::AV_PIX_FMT_YUV420P as c_int {
             let y = from_raw_parts(datas[0], (linesizes[0] * height) as usize).to_vec();

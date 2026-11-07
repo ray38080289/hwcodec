@@ -14,6 +14,8 @@
 enum AVPixelFormat {
   AV_PIX_FMT_YUV420P = 0,
   AV_PIX_FMT_NV12 = 23,
+  // not an FFmpeg value: the frame is a retained-by-callee CVPixelBufferRef in data[3] (macOS, VideoToolbox, NV12)
+  HWCODEC_PIX_FMT_CVPIXELBUFFER = 0x10000,
 };
 
 int av_log_get_level(void);
