@@ -164,6 +164,16 @@ mod ffmpeg {
                 .iter()
                 .map(|lib| println!("cargo:rustc-link-lib=static={}", lib))
                 .count();
+            // The static FFmpeg libraries are bundled into this crate's rlib: rebuild when vcpkg rebuilds them (a
+            // patch to the ffmpeg port), or a cached target keeps linking the old FFmpeg.
+            for lib in &static_libs {
+                for name in [format!("lib{}.a", lib), format!("{}.lib", lib)] {
+                    let f = path.join("lib").join(name);
+                    if f.exists() {
+                        println!("cargo:rerun-if-changed={}", f.display());
+                    }
+                }
+            }
         }
 
         let include = path.join("include");
